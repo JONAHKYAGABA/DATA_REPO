@@ -1,0 +1,18 @@
+# Ignore the entire directory named evaluation-2024
+evaluation-2024/
+
+# Ignore all files with the .ecg extension
+.ecg/
+
+# Ignore the entire directory named 20000
+20000/
+records500/
+# Ignore the entire directory named data1
+data1/
+code repo-20240622T221134Z-001/
+# Ignore the entire directory named test_data
+test_data/
+
+# Ignore the entire directory named test_outputs
+test_outputs/
+__pycache__/
