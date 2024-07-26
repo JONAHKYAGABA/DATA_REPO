@@ -6,6 +6,7 @@ COPY ./ /challenge
 WORKDIR /challenge
 
 ## Install your dependencies here using apt install, etc.
-
+# Download the VGG19 model weights and cache them
+RUN python -c "import torchvision.models as models; model = models.vgg19(pretrained=True)"
 ## Include the following line if you have a requirements.txt file.
 RUN pip install -r requirements.txt
