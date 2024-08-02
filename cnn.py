@@ -25,8 +25,8 @@ class VGGMODEL(nn.Module):
         self.list_of_classes = list_of_classes
         self.num_classes = len(self.list_of_classes)
         
-        # Load the VGG19 model with pre-trained weights
-        self.vgg19 = models.vgg19(pretrained=True)
+       
+        self.vgg19 = models.vgg19(pretrained=False)
         
         # Add SE-Layer to each block
         self.se_layers = nn.ModuleList([
