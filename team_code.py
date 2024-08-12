@@ -1,19 +1,11 @@
-#!/usr/bin/env python
-
-# Edit this script to add your team's code. Some functions are *required*, but you can edit most parts of the required functions,
-# change or remove non-required functions, and add your own functions.
-
-################################################################################
-#
-# Optional libraries, functions, and variables. You can change or remove them.
-#
-################################################################################
-
 import joblib
 import numpy as np
 import os
 import random
 import shutil
+import os
+import shutil
+import joblib
 import sys
 import torch
 import torch.nn as nn
@@ -26,7 +18,7 @@ from functools import partial
 from helper_code import *
 from matplotlib import pyplot as plt
 from cnn import VGGMODEL
-from sklearn.metrics import average_precision_score,precision_recall_curve,roc_curve, roc_auc_score
+from sklearn.metrics import average_precision_score, precision_recall_curve, roc_curve, roc_auc_score
 from sklearn.model_selection import train_test_split
 from torch import Tensor
 from torch.optim.lr_scheduler import StepLR
@@ -38,23 +30,16 @@ from typing import Callable, Optional
 
 DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 EPOCHS = 100
-CLASSIFICATION_THRESHOLD=0.5
-CLASSIFICATION_DISTANCE_TO_MAX_THRESHOLD=0.1
-LIST_OF_ALL_LABELS=['NORM', 'Acute MI', 'Old MI', 'STTC', 'CD', 'HYP', 'PAC', 'PVC', 'AFIB/AFL', 'TACHY', 'BRADY'] 
-RESIZE_TEST_IMAGES=(425, 550)
-OPTIM_LR=1e-4
-OPTIM_WEIGHT_DECAY=1e-4
-SCHEDULER_STEP_SIZE=7
-SCHEDULER_GAMMA=0.1
+CLASSIFICATION_THRESHOLD = 0.5
+CLASSIFICATION_DISTANCE_TO_MAX_THRESHOLD = 0.1
+LIST_OF_ALL_LABELS = ['NORM', 'Acute MI', 'Old MI', 'STTC', 'CD', 'HYP', 'PAC', 'PVC', 'AFIB/AFL', 'TACHY', 'BRADY']
+RESIZE_TEST_IMAGES = (425, 550)
+OPTIM_LR = 1e-4
+OPTIM_WEIGHT_DECAY = 1e-4
+SCHEDULER_STEP_SIZE = 7
+SCHEDULER_GAMMA = 0.1
+GRAD_CLIP = 10
 
-################################################################################
-#
-# Required functions. Edit these functions to add your code, but do not change the arguments of the functions.
-#
-################################################################################
-
-# Train your models. This function is *required*. You should edit this function to add your code, but do *not* change the arguments
-# of this function. If you do not train one of the models, then you can return None for the model.
 
 def train_models(data_folder, model_folder, verbose):
     if verbose:
@@ -144,7 +129,7 @@ def train_models(data_folder, model_folder, verbose):
             N_item = N.item()
             N_item_sum += N_item
 
-            torch.nn.utils.clip_grad_norm_(classification_model.parameters(), max_norm=10)
+            torch.nn.utils.clip_grad_norm_(classification_model.parameters(), max_norm=GRAD_CLIP)
             opt.step()
             if verbose:
                 print(f"Epoch: {epoch}, Iteration: {i}, Loss: {N_item}")
@@ -184,8 +169,8 @@ def train_models(data_folder, model_folder, verbose):
         valid_auprc.append(auprc_v)
         valid_auroc.append(auroc_v)
 
-        N_loss.append(N_item_sum / i)
-        N_loss_valid.append(N_item_sum_valid / j)
+        N_loss.append(N_item_sum / len(training_loader))
+        N_loss_valid.append(N_item_sum_valid / len(validation_loader))
 
         fig = plt.figure()
         plt.plot(N_loss, label="train")
@@ -225,74 +210,54 @@ def train_models(data_folder, model_folder, verbose):
         print('Done.')
         print()
 
-# Load your trained models. This function is *required*. You should edit this
-# function to add your code, but do *not* change the arguments of this
-# function. If you do not train one of the models, then you can return None for
-# the model.
 def load_models(model_folder, verbose):
     digitization_model = None
 
     classes_filename = os.path.join(model_folder, 'classes.txt')
     classes = joblib.load(classes_filename)
 
-    classification_model = VGGMODEL(classes).to(DEVICE) # instantiate a new copy of the model
+    classification_model = VGGMODEL(classes).to(DEVICE)
     classification_filename = os.path.join(model_folder, "classification_model.pth")
     classification_model.load_state_dict(torch.load(classification_filename))
 
     return digitization_model, classification_model
 
-# Run your trained digitization model. This function is *required*. You should edit this function to add your code, but do *not*
-# change the arguments of this function. If you did not train one of the models, then you can return None for the model.
 def run_models(record, digitization_model, classification_model, verbose):
-
-    # Run the digitization model; if you did not train this model, then you can set signal = None.
     signal = None
 
-    # Run the classification model.
     classes = classification_model.list_of_classes
 
-    # Open the image:
-    record_parent_folder=os.path.dirname(record)
-    image_files=get_image_files(record)
-    image_path=os.path.join(record_parent_folder, image_files[0])
+    record_parent_folder = os.path.dirname(record)
+    image_files = get_image_files(record)
+    image_path = os.path.join(record_parent_folder, image_files[0])
     img = Image.open(image_path)
-    # FIXME: repeated code---maybe factor out opening the image from a record
+
     if img.mode != 'RGB':
         img = img.convert('RGB')
 
-    # transform the image and make it suitable as input
     img = transforms.Resize(RESIZE_TEST_IMAGES)(img)
     img = transforms.ToTensor()(img)
     img = transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])(img)
     img = img.unsqueeze(0)
 
-    # send it to the GPU if necessary
     img = img.float().to(DEVICE)
 
     classification_model.eval()
     with torch.no_grad():
         probabilities = torch.squeeze(classification_model(img), 0).tolist()
-        predictions=list()
+        predictions = []
         for i in range(len(classes)):
             if probabilities[i] >= CLASSIFICATION_THRESHOLD:
                 predictions.append(classes[i])
 
-    # backup if none is over the threshold: use the max
-    if predictions==[]:
-        highest_probability=max(probabilities)
+    if predictions == []:
+        highest_probability = max(probabilities)
         for i in range(len(classes)):
             if abs(highest_probability - probabilities[i]) <= CLASSIFICATION_DISTANCE_TO_MAX_THRESHOLD:
                 predictions.append(classes[i])
 
     return signal, predictions
 
-#########################################################################################
-#
-# Optional functions. You can change or remove these functions and/or add new functions.
-#
-#########################################################################################
-
-# Extract features.
 def extract_features(record):
     images = load_images(record)
     mean = 0.0
@@ -301,17 +266,27 @@ def extract_features(record):
         image = np.asarray(image)
         mean += np.mean(image)
         std += np.std(image)
-    return np.array([mean, std])
+    return np
+
 
 # Save your trained models.
-def save_classification_model(model_folder,
-                list_of_classes=None,
-                final_weights=None):
-
+def save_classification_model(model_folder, list_of_classes=None, final_weights=None):
+    # Ensure the model folder exists
+    os.makedirs(model_folder, exist_ok=True)    
+    # Check if the final weights file is provided
     if final_weights is not None:
-        classes=filename = os.path.join(model_folder, 'classes.txt')
-        joblib.dump(list_of_classes, filename, protocol=0)
-
-        # copy the file with the final weights to the model path
-        model_filename=os.path.join(model_folder, "classification_model.pth")
-        shutil.copyfile(final_weights, model_filename)
+        # Save the list of classes
+        if list_of_classes is not None:
+            classes_filename = os.path.join(model_folder, 'classes.txt')
+            joblib.dump(list_of_classes, classes_filename, protocol=0)
+        else:
+            raise ValueError("list_of_classes must be provided when saving the model.")
+        # Copy the file with the final weights to the model path
+        model_filename = os.path.join(model_folder, "classification_model.pth")
+        
+        if os.path.isfile(final_weights):
+            shutil.copyfile(final_weights, model_filename)
+        else:
+            raise FileNotFoundError(f"File {final_weights} does not exist. Cannot copy to {model_filename}.")
+    else:
+        raise ValueError("final_weights must be provided when saving the model.")
