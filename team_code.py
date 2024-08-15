@@ -3,14 +3,10 @@ import numpy as np
 import os
 import random
 import shutil
-import os
-import shutil
-import joblib
-import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
+from PIL import Image
 from PIL import Image
 from collections import OrderedDict
 from data_loader import get_training_and_validation_loaders
@@ -21,7 +17,7 @@ from cnn import VGGMODEL
 from sklearn.metrics import average_precision_score, precision_recall_curve, roc_curve, roc_auc_score
 from sklearn.model_selection import train_test_split
 from torch import Tensor
-from torch.optim.lr_scheduler import StepLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import Dataset
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
@@ -33,13 +29,39 @@ EPOCHS = 100
 CLASSIFICATION_THRESHOLD = 0.5
 CLASSIFICATION_DISTANCE_TO_MAX_THRESHOLD = 0.1
 LIST_OF_ALL_LABELS = ['NORM', 'Acute MI', 'Old MI', 'STTC', 'CD', 'HYP', 'PAC', 'PVC', 'AFIB/AFL', 'TACHY', 'BRADY']
-RESIZE_TEST_IMAGES = (425, 550)
+RESIZE_TEST_IMAGES = (224, 224)
 OPTIM_LR = 1e-4
 OPTIM_WEIGHT_DECAY = 1e-4
-SCHEDULER_STEP_SIZE = 7
-SCHEDULER_GAMMA = 0.1
 GRAD_CLIP = 10
 
+# Data augmentation transformations
+train_transforms = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomRotation(10),
+    transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
+
+valid_transforms = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
+
+# Focal Loss definition
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=1, gamma=2):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, inputs, targets):
+        BCE_loss = F.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-BCE_loss)
+        F_loss = self.alpha * (1-pt)**self.gamma * BCE_loss
+        return F_loss.mean()
 
 def train_models(data_folder, model_folder, verbose):
     if verbose:
@@ -82,15 +104,16 @@ def train_models(data_folder, model_folder, verbose):
         print('Training the models on the data...')
 
     training_loader, validation_loader = get_training_and_validation_loaders(
-        LIST_OF_ALL_LABELS, classification_images, classification_labels)
+        LIST_OF_ALL_LABELS, classification_images, classification_labels, 
+        train_transform=train_transforms, valid_transform=valid_transforms)
 
     classification_model = VGGMODEL(LIST_OF_ALL_LABELS).to(DEVICE)
     for param in classification_model.parameters():
         param.requires_grad = True
 
-    loss = nn.CrossEntropyLoss()
+    loss = FocalLoss()
     opt = optim.Adam(classification_model.parameters(), lr=OPTIM_LR, weight_decay=OPTIM_WEIGHT_DECAY)
-    scheduler = StepLR(opt, step_size=SCHEDULER_STEP_SIZE, gamma=SCHEDULER_GAMMA)
+    scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.1, patience=10, verbose=True)
 
     N_loss = []
     N_loss_valid = []
@@ -152,7 +175,7 @@ def train_models(data_folder, model_folder, verbose):
                 outputs_valid.append(prediction.data.cpu().numpy())
                 print(f"Epoch: {epoch}, Valid Iteration: {j}, Loss: {N_item}")
 
-        scheduler.step()
+        scheduler.step(N_item_sum_valid / len(validation_loader))
 
         targets_train = np.concatenate(targets_train, axis=0).T
         outputs_train = np.concatenate(outputs_train, axis=0).T
@@ -217,10 +240,20 @@ def load_models(model_folder, verbose):
     classes = joblib.load(classes_filename)
 
     classification_model = VGGMODEL(classes).to(DEVICE)
-    classification_filename = os.path.join(model_folder, "classification_model.pth")
-    classification_model.load_state_dict(torch.load(classification_filename))
+    for param in classification_model.parameters():
+        param.requires_grad = True
+
+    model_filename = os.path.join(model_folder, 'classification_model.pth')
+    classification_model.load_state_dict(torch.load(model_filename))
 
     return digitization_model, classification_model
+
+
+def resize_image(image_file, size=(224, 224)):
+    """Resizes the image to the specified size."""
+    image = Image.open(image_file)
+    resized_image = image.resize(size)
+    return np.array(resized_image)
 
 def run_models(record, digitization_model, classification_model, verbose):
     signal = None
@@ -229,34 +262,22 @@ def run_models(record, digitization_model, classification_model, verbose):
 
     record_parent_folder = os.path.dirname(record)
     image_files = get_image_files(record)
-    image_path = os.path.join(record_parent_folder, image_files[0])
-    img = Image.open(image_path)
+    image_file = os.path.join(record_parent_folder, image_files[0])
 
-    if img.mode != 'RGB':
-        img = img.convert('RGB')
+    resized_image = resize_image(image_file)
 
-    img = transforms.Resize(RESIZE_TEST_IMAGES)(img)
-    img = transforms.ToTensor()(img)
-    img = transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])(img)
-    img = img.unsqueeze(0)
-
-    img = img.float().to(DEVICE)
-
+    images = torch.tensor(resized_image).unsqueeze(0).to(DEVICE)
     classification_model.eval()
-    with torch.no_grad():
-        probabilities = torch.squeeze(classification_model(img), 0).tolist()
-        predictions = []
-        for i in range(len(classes)):
-            if probabilities[i] >= CLASSIFICATION_THRESHOLD:
-                predictions.append(classes[i])
+    predictions = classification_model(images).data.cpu().numpy()
 
-    if predictions == []:
-        highest_probability = max(probabilities)
-        for i in range(len(classes)):
-            if abs(highest_probability - probabilities[i]) <= CLASSIFICATION_DISTANCE_TO_MAX_THRESHOLD:
-                predictions.append(classes[i])
+    labels = dict()
+    for k, l in enumerate(classes):
+        score = predictions[0][k]
+        label = int(score >= CLASSIFICATION_THRESHOLD)
+        labels[l] = label
 
-    return signal, predictions
+    return signal, labels
+
 
 def extract_features(record):
     images = load_images(record)
